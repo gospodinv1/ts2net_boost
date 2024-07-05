@@ -1,0 +1,104 @@
+library(Rcpp)
+cppFunction('
+DataFrame tsnet_vg_cpp(NumericVector x, std::string method, bool directed, int limit, int num_cores) {
+    int n = x.size();
+    std::vector<std::pair<int, int>> links;
+    
+    #pragma omp parallel for schedule(dynamic) num_threads(num_cores)
+    for (int i = 0; i < n - 1; ++i) {
+        for (int j = i + 1; j < n; ++j) {
+            bool linked = true;
+            if (abs(j - i) > limit) {
+                linked = false;
+            } else {
+                if (abs(j - i) != 1) {
+                    if (method == "nvg") {
+                        for (int k = i + 1; k < j; ++k) {
+                            if (x[k] >= x[j] + ((x[i] - x[j]) * (j - k) / (j - i))) {
+                                linked = false;
+                                break;
+                            }
+                        }
+                    } else if (method == "hvg") {
+                        for (int k = i + 1; k < j; ++k) {
+                            if (x[k] >= x[i] || x[k] >= x[j]) {
+                                linked = false;
+                                break;
+                            }
+                        }
+                    }
+                }
+            }
+            if (linked) {
+                #pragma omp critical
+                links.push_back(std::make_pair(i + 1, j + 1)); // R is 1-based index
+            }
+        }
+    }
+    
+    IntegerVector from(links.size());
+    IntegerVector to(links.size());
+    for (size_t i = 0; i < links.size(); ++i) {
+        from[i] = links[i].first;
+        to[i] = links[i].second;
+    }
+    
+    return DataFrame::create(Named("from") = from, Named("to") = to);
+}
+')
+
+tsnet_vg <- function(x, method=c("nvg", "hvg"), directed=FALSE, limit=+Inf, num_cores=2) {
+    if (length(x) < 2) {
+        stop("Vector length must be at least 2.")
+    }
+    method = match.arg(method)
+    links = tsnet_vg_cpp(x, method, directed, limit, num_cores)
+    graph.data.frame(links, directed = directed)
+}
+
+
+
+library(igraph)
+library(parallel)
+
+tsnet_vg_r <- function(x, method=c("nvg", "hvg"), directed=FALSE, limit=+Inf, num_cores=1) {
+    if (length(x) < 2) {
+        stop("Vector length must be at least 2.")
+    }
+    id_combs = combn(length(x), 2, simplify = FALSE)
+    method = match.arg(method)
+    links = unlist(mclapply(id_combs, \(ids){
+        linked = TRUE
+        if (abs(diff(ids)) > limit){
+            linked = FALSE
+        } else {
+            if (abs(diff(ids))!=1) {
+                switch(method,
+                       nvg={
+                            for (i in seq(ids[1]+1, ids[2]-1)) {
+                                if (x[i] >= x[ids[2]] + ((x[ids[1]]-x[ids[2]])*(ids[2]-i)/(ids[2]-ids[1]))) {
+                                    linked = FALSE
+                                    break
+                                }
+                            }
+                        },
+                        hvg = {
+                            for (i in seq(ids[1]+1, ids[2]-1)) {
+                                if (x[i] >= x[ids[1]] || x[i] >= x[ids[2]]) {
+                                    linked = FALSE
+                                    break
+                                }
+                            }
+                        })
+            }
+        }
+        linked
+    }, mc.cores = num_cores))
+    links = do.call(rbind, id_combs[links])
+    graph.data.frame(links, directed = directed)
+}
+
+
+
+
+
